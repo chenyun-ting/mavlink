@@ -1,87 +1,164 @@
-cmake_minimum_required(VERSION 3.13)
+############################################################################
+#
+#   Copyright (c) 2015-2023 PX4 Development Team. All rights reserved.
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions
+# are met:
+#
+# 1. Redistributions of source code must retain the above copyright
+#    notice, this list of conditions and the following disclaimer.
+# 2. Redistributions in binary form must reproduce the above copyright
+#    notice, this list of conditions and the following disclaimer in
+#    the documentation and/or other materials provided with the
+#    distribution.
+# 3. Neither the name PX4 nor the names of its contributors may be
+#    used to endorse or promote products derived from this software
+#    without specific prior written permission.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+# "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+# LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+# FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+# COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+# INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+# BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS
+# OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED
+# AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+# LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
+# ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+# POSSIBILITY OF SUCH DAMAGE.
+#
+############################################################################
 
-project(mavlink)
+set(MAVLINK_GIT_DIR "${CMAKE_CURRENT_LIST_DIR}/mavlink")
+set(MAVLINK_LIBRARY_DIR "${CMAKE_BINARY_DIR}/mavlink")
+file(RELATIVE_PATH MAVLINK_GIT_DIR_RELATIVE ${CMAKE_SOURCE_DIR} ${MAVLINK_GIT_DIR})
 
-find_package(Python COMPONENTS Interpreter REQUIRED)
+px4_add_git_submodule(TARGET git_mavlink_v2 PATH "${MAVLINK_GIT_DIR}")
 
-# We automatically install the pip dependencies locally below.
-# Therefore, we check whether pip is available here.
-execute_process(
-    COMMAND ${Python_EXECUTABLE} -m pip -V
-    RESULT_VARIABLE EXIT_CODE
-    OUTPUT_QUIET
+# always generate uAvionix dialect
+set(MAVLINK_DIALECT_UAVIONIX "uAvionix")
+add_custom_command(
+	OUTPUT ${MAVLINK_LIBRARY_DIR}/${MAVLINK_DIALECT_UAVIONIX}/${MAVLINK_DIALECT_UAVIONIX}.h
+	COMMAND
+		${PYTHON_EXECUTABLE} ${MAVLINK_GIT_DIR}/pymavlink/tools/mavgen.py
+			--lang C --wire-protocol 2.0
+			--output ${MAVLINK_LIBRARY_DIR}
+			${MAVLINK_GIT_DIR}/message_definitions/v1.0/${MAVLINK_DIALECT_UAVIONIX}.xml > ${CMAKE_CURRENT_BINARY_DIR}/mavgen_${MAVLINK_DIALECT_UAVIONIX}.log
+	DEPENDS
+		git_mavlink_v2
+		${MAVLINK_GIT_DIR}/pymavlink/tools/mavgen.py
+		${MAVLINK_GIT_DIR}/message_definitions/v1.0/${MAVLINK_DIALECT_UAVIONIX}.xml
+
+	COMMENT "Generating Mavlink ${MAVLINK_DIALECT_UAVIONIX}: ${MAVLINK_GIT_DIR_RELATIVE}/message_definitions/v1.0/${MAVLINK_DIALECT_UAVIONIX}.xml"
 )
-if (NOT ${EXIT_CODE} EQUAL 0)
-    message(FATAL_ERROR "Python pip not found, pip is required")
+add_custom_target(mavlink_c_generate_uavionix DEPENDS ${MAVLINK_LIBRARY_DIR}/${MAVLINK_DIALECT_UAVIONIX}/${MAVLINK_DIALECT_UAVIONIX}.h)
+set_source_files_properties(${MAVLINK_LIBRARY_DIR}/${MAVLINK_DIALECT_UAVIONIX}/${MAVLINK_DIALECT_UAVIONIX}.h PROPERTIES GENERATED true)
+
+# generate the primary dialect
+add_custom_command(
+	OUTPUT ${MAVLINK_LIBRARY_DIR}/${CONFIG_MAVLINK_DIALECT}/${CONFIG_MAVLINK_DIALECT}.h
+	COMMAND
+		${PYTHON_EXECUTABLE} ${MAVLINK_GIT_DIR}/pymavlink/tools/mavgen.py
+			--lang C --wire-protocol 2.0
+			--output ${MAVLINK_LIBRARY_DIR}
+			${MAVLINK_GIT_DIR}/message_definitions/v1.0/${CONFIG_MAVLINK_DIALECT}.xml > ${CMAKE_CURRENT_BINARY_DIR}/mavgen_${CONFIG_MAVLINK_DIALECT}.log
+	DEPENDS
+		git_mavlink_v2
+		${MAVLINK_GIT_DIR}/pymavlink/tools/mavgen.py
+		${MAVLINK_GIT_DIR}/message_definitions/v1.0/${CONFIG_MAVLINK_DIALECT}.xml
+		${BOARD_DEFCONFIG}
+
+		# generate after uAvionix
+		mavlink_c_generate_uavionix
+		${MAVLINK_LIBRARY_DIR}/${MAVLINK_DIALECT_UAVIONIX}/${MAVLINK_DIALECT_UAVIONIX}.h
+
+	COMMENT "Generating Mavlink ${CONFIG_MAVLINK_DIALECT}: ${MAVLINK_GIT_DIR_RELATIVE}/message_definitions/v1.0/${CONFIG_MAVLINK_DIALECT}.xml"
+)
+add_custom_target(mavlink_c_generate DEPENDS ${MAVLINK_LIBRARY_DIR}/${CONFIG_MAVLINK_DIALECT}/${CONFIG_MAVLINK_DIALECT}.h)
+set_source_files_properties(${MAVLINK_LIBRARY_DIR}/${CONFIG_MAVLINK_DIALECT}/${CONFIG_MAVLINK_DIALECT}.h PROPERTIES GENERATED true)
+
+
+
+# mavlink header only library
+add_library(mavlink_c INTERFACE)
+target_compile_options(mavlink_c INTERFACE -Wno-address-of-packed-member -Wno-cast-align)
+target_sources(mavlink_c
+	INTERFACE
+		${MAVLINK_LIBRARY_DIR}/${CONFIG_MAVLINK_DIALECT}/${CONFIG_MAVLINK_DIALECT}.h
+		${MAVLINK_LIBRARY_DIR}/${MAVLINK_DIALECT_UAVIONIX}/${MAVLINK_DIALECT_UAVIONIX}.h
+)
+target_include_directories(mavlink_c
+	INTERFACE
+		${MAVLINK_LIBRARY_DIR}
+		${MAVLINK_LIBRARY_DIR}/${CONFIG_MAVLINK_DIALECT}
+		${MAVLINK_LIBRARY_DIR}/${MAVLINK_DIALECT_UAVIONIX}
+)
+
+px4_add_module(
+	MODULE modules__mavlink
+	MAIN mavlink
+	COMPILE_FLAGS
+		-Wno-enum-compare # ROTATION <-> MAV_SENSOR_ROTATION
+		#-DDEBUG_BUILD
+	SRCS
+		mavlink.c
+		mavlink_command_sender.cpp
+		mavlink_events.cpp
+		mavlink_ftp.cpp
+		mavlink_log_handler.cpp
+		mavlink_main.cpp
+		mavlink_messages.cpp
+		mavlink_mission.cpp
+		mavlink_parameters.cpp
+		mavlink_rate_limiter.cpp
+		mavlink_receiver.cpp
+		mavlink_shell.cpp
+		mavlink_simple_analyzer.cpp
+		mavlink_stream.cpp
+		mavlink_timesync.cpp
+		mavlink_ulog.cpp
+		MavlinkStatustextHandler.cpp
+		open_drone_id_translations.cpp
+		tune_publisher.cpp
+	MODULE_CONFIG
+		module.yaml
+	DEPENDS
+		adsb
+		airspeed
+		component_general_json # for checksums.h
+		dataman_client
+		drivers_accelerometer
+		drivers_gyroscope
+		drivers_magnetometer
+		conversion
+		sensor_calibration
+		geo
+		mavlink_c
+		timesync
+		tunes
+		variable_length_ringbuffer
+		version
+	UNITY_BUILD
+	)
+
+if(PX4_TESTING)
+	add_subdirectory(mavlink_tests)
 endif()
 
-if (NOT MAVLINK_DIALECT)
-    set(MAVLINK_DIALECT common)
+px4_add_unit_gtest(SRC MavlinkStatustextHandlerTest.cpp
+	INCLUDES
+		${MAVLINK_LIBRARY_DIR}
+		${MAVLINK_LIBRARY_DIR}/${CONFIG_MAVLINK_DIALECT}
+		${MAVLINK_LIBRARY_DIR}/${MAVLINK_DIALECT_UAVIONIX}
+	COMPILE_FLAGS
+		-Wno-address-of-packed-member # TODO: fix in c_library_v2
+		-Wno-cast-align # TODO: fix
+	LINKLIBS
+		modules__mavlink
+	)
+
+if(CONFIG_NET AND "${PX4_PLATFORM}" MATCHES "nuttx")
+	target_link_libraries(modules__mavlink PRIVATE nuttx_apps) # netlib_get_ipv4netmask
 endif()
-message(STATUS "MAVLink dialect: ${MAVLINK_DIALECT}")
-
-if (NOT MAVLINK_VERSION)
-    set(MAVLINK_VERSION 2.0)
-endif()
-message(STATUS "MAVLink version: ${MAVLINK_VERSION}")
-
-set(EXAMPLE_HEADER ${CMAKE_CURRENT_BINARY_DIR}/include/mavlink/${MAVLINK_DIALECT}/mavlink.h)
-
-add_custom_command(OUTPUT ${EXAMPLE_HEADER}
-    COMMAND ${Python_EXECUTABLE}
-        -m pip install -r pymavlink/requirements.txt --upgrade -t ${CMAKE_CURRENT_BINARY_DIR}/pip-dependencies/
-        COMMAND ${CMAKE_COMMAND} -E env "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR}/pip-dependencies/" ${Python_EXECUTABLE}
-        -m pymavlink.tools.mavgen
-        --lang=C
-        --wire-protocol=${MAVLINK_VERSION}
-        --output ${CMAKE_CURRENT_BINARY_DIR}/include/mavlink/
-        message_definitions/v1.0/${MAVLINK_DIALECT}.xml
-        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-    DEPENDS message_definitions/v1.0/${MAVLINK_DIALECT}.xml
-    COMMENT "Generating C headers")
-
-# Unfortunately, the dependencies don't work for INTERFACE libraries.
-# The only way I could make it work is to add ALL which means it
-# will do the file generation every time even when nothing has changed.
-add_custom_target(generate_c_headers
-    ALL
-    DEPENDS ${EXAMPLE_HEADER})
-
-add_library(mavlink INTERFACE)
-
-add_dependencies(mavlink generate_c_headers)
-
-include(GNUInstallDirs)
-
-target_include_directories(mavlink
-    INTERFACE
-    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
-)
-
-install(TARGETS mavlink
-    EXPORT MAVLinkTargets
-    PUBLIC_HEADER DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-)
-
-install(DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/include/mavlink"
-    DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
-    FILES_MATCHING PATTERN "*.h"
-)
-
-install(EXPORT MAVLinkTargets
-    FILE MAVLinkTargets.cmake
-    NAMESPACE MAVLink::
-    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/MAVLink
-)
-
-# For the build tree
-configure_file(MAVLinkConfig.cmake.in
-    "${PROJECT_BINARY_DIR}/MAVLinkConfig.cmake" @ONLY)
-# For the install tree
-configure_file(MAVLinkConfig.cmake.in
-    "${PROJECT_BINARY_DIR}${CMAKE_FILES_DIRECTORY}/MAVLinkConfig.cmake" @ONLY)
-
-install(FILES
-    "${PROJECT_BINARY_DIR}/${CMAKE_FILES_DIRECTORY}/MAVLinkConfig.cmake"
-    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/MAVLink
-)
